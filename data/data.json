@@ -21,7 +21,7 @@
       "elevatorName": "1号楼电梯一",
       "buildingName": "1号楼",
       "averageSpeed": 2.0,
-      "doorOperationTime": 10,
+      "doorOperationTime": 1.5,
       "position": { "x": 38000, "y": 15000, "z": 110 },
       "initialLayer": 1
     },
@@ -29,7 +29,7 @@
       "elevatorName": "1号楼电梯二",
       "buildingName": "1号楼",
       "averageSpeed": 2.0,
-      "doorOperationTime": 10,
+      "doorOperationTime": 1.5,
       "position": { "x": 41000, "y": 15000, "z": 110 },
       "initialLayer": 1
     },
@@ -37,7 +37,7 @@
       "elevatorName": "2号楼电梯一",
       "buildingName": "2号楼",
       "averageSpeed": 2.0,
-      "doorOperationTime": 10,
+      "doorOperationTime": 1.5,
       "position": { "x": 101299, "y": 15000, "z": 110 },
       "initialLayer": 1
     },

@@ -1,327 +1,388 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-多机器人调度与路径规划（演示实现）
-Features:
-- Graph nodes are (ord, floor) represented by string keys "ord:floor"
-- Edges have types: 'flat' (same floor), 'stair' (cross-floor), 'lift' (elevator link)
-- EdgeTag records occupied_until (time). LiftTag records schedule and capacity (here capacity=1).
-- FindShortestPath implements a Dijkstra-like algorithm that allows waiting for resource availability.
-- Greedy task assignment: for each task (by time), choose robot with minimal travel time to task.start.
+============================================================
+Full Implementation (with Dijkstra Path Planning)
+Multi-Robot Task Scheduling and Path Planning in Multi-Floor Building
+------------------------------------------------------------
+Now integrates real graph-based shortest path computation
+Author: Zhiyi Mou
+Date: 2025-10-24
+============================================================
 """
 
-from heapq import heappush, heappop
-from collections import defaultdict, namedtuple
+import heapq
 import math
+import matplotlib.pyplot as plt
+from typing import List, Dict, Tuple
+from graph import inital_graph  # 导入你构建的图
 
-# ---- Data classes ----
+# ============================================================
+# Graph and Pathfinding
+# ============================================================
+
+# Graph class is defined in graph.py, so we don't redefine it here.
+# We will get the graph object from inital_graph()
+
+# ============================================================
+# Core Data Structures
+# ============================================================
+
+class Elevator:
+    """Elevator with schedule and availability logic."""
+    def __init__(self, eid: int, bldg_num: int, local_id: str, current_floor: int = 1):
+        self.id = eid
+        self.bldg_num = bldg_num  # 建筑编号 (1, 2, or 3)
+        self.local_id = local_id  # 电梯本地ID ('E1' or 'E2')
+        self.state = "idle"
+        self.current_floor = current_floor
+        self.schedule: List[Tuple[float, float, int, int, int]] = []  # (start, end, from_floor, to_floor, robot_id)
+
+    def is_available(self, desired_start: float, duration: float, from_floor: int) -> Tuple[bool, float]:
+        """
+        返回 (available, extra_time):
+          - If available: (True, elevator arrival time)
+          - If not: (False, waiting time + arrival time)
+        """
+        # 假设电梯移动1层需要1.5s (这个可以调整)
+        floor_diff = abs(self.current_floor - from_floor)
+        arrive_time = floor_diff * 1.5  # per-floor movement time
+
+        # 检查时间冲突
+        effective_start_time = desired_start + arrive_time
+
+        for (s, e, *_rest) in self.schedule:
+            # 检查时间段 [effective_start_time, effective_start_time + duration]
+            # 是否与 [s, e] 重叠
+            if not (effective_start_time + duration <= s or effective_start_time >= e):
+                wait_time = e - effective_start_time  # 需要等待的时间
+                # 总的额外时间 = 电梯到达时间 + 冲突等待时间
+                return False, arrive_time + wait_time
+
+        # 没有冲突，额外时间 = 电梯到达时间
+        return True, arrive_time
+
+    def reserve(self, start_time: float, duration: float, from_floor: int, to_floor: int, robot_id: int):
+        """Append usage record and update current floor."""
+        end_time = start_time + duration
+        self.schedule.append((start_time, end_time, from_floor, to_floor, robot_id))
+        self.schedule.sort(key=lambda x: x[0])
+        self.current_floor = to_floor
+        print(f"     [Elevator {self.id} Reserved: R{robot_id}, {from_floor}->{to_floor}, Time: {start_time:.2f}s - {end_time:.2f}s]")
+
+
 class Robot:
-    def __init__(self, id, rtype, skill, ord, floor, v_flat, v_stair):
-        self.id = id
-        self.type = rtype
+    def __init__(self, rid: int, skill: str, position: str, available_time: float = 0.0):
+        self.id = rid
         self.skill = skill
-        self.ord = ord
-        self.floor = floor
-        self.position = (ord, floor)
-        self.v_flat = v_flat      # speed on flat edges (m/s)
-        self.v_stair = v_stair    # speed on stairs (m/s)
-        self.available_time = 0.0 # next time robot is free
+        self.position = position
+        self.available_time = available_time  # 机器人可以开始新任务的最早时间
 
-    def speed_for_edge(self, edge_type):
-        if edge_type == 'stair':
-            return self.v_stair
-        else:
-            return self.v_flat
-
-    def __repr__(self):
-        return f"Robot({self.id}, pos={self.position}, skill={self.skill}, avail={self.available_time})"
 
 class Task:
-    def __init__(self, id, skill_req, start, target, time):
-        self.id = id
-        self.skill_req = skill_req
-        self.start = start      # (ord, floor)
-        self.target = target    # (ord, floor)
-        self.time = time        # task arrival / earliest start (could be deadline in other designs)
+    def __init__(self, tid: int, skill: str, start: str, target: str):
+        self.id = tid
+        self.skill = skill
+        self.start = start  # 任务发布地点 (目前未使用，但保留)
+        self.target = target # 任务目标地点
 
-    def __repr__(self):
-        return f"Task({self.id}, {self.start}->{self.target}, skill={self.skill_req}, time={self.time})"
 
-Edge = namedtuple('Edge', ['u','v','length','etype','id'])  # etype: 'flat'|'stair'|'lift'
+# ============================================================
+# Helper Functions
+# ============================================================
 
-# ---- Resource tags ----
-class EdgeTag:
-    def __init__(self):
-        # maps edge_id -> occupied_until_time (float)
-        self.occupied_until = defaultdict(float)  # default 0.0 (free)
+def get_node_details(node_str: str) -> Tuple[int, int]:
+    """从节点名称 'floor_bldg_...' 中解析楼层和建筑ID."""
+    try:
+        parts = node_str.split('_')
+        floor = int(parts[0])
+        bldg = int(parts[1])
+        return floor, bldg
+    except (ValueError, IndexError):
+        print(f"Warning: Could not parse node details from '{node_str}'")
+        return -1, -1
 
-    def get_free_time(self, edge_id):
-        return self.occupied_until.get(edge_id, 0.0)
 
-    def reserve(self, edge_id, start_time, duration):
-        end = start_time + duration
-        # We assume single reservation per edge per time; if overlapping, this simply moves the occupied_until forward.
-        self.occupied_until[edge_id] = max(self.occupied_until.get(edge_id, 0.0), end)
+def travel_time_to_elevator(robot: Robot, elevator: Elevator, graph) -> float:
+    """计算机器人从当前位置到目标电梯在同一楼层入口的时间."""
+    # 1. 获取机器人当前在哪一层
+    robot_floor, _ = get_node_details(robot.position)
 
-class LiftTag:
-    def __init__(self, lift_ids):
-        # For each lift_id, track next_free_time (capacity=1)
-        self.next_free = {lid: 0.0 for lid in lift_ids}
-        # If you want richer schedule, replace next_free with a list of reservations.
-    def get_free_time(self, lift_id):
-        return self.next_free.get(lift_id, 0.0)
-    def reserve(self, lift_id, start_time, duration):
-        end = start_time + duration
-        self.next_free[lift_id] = max(self.next_free.get(lift_id, 0.0), end)
+    # 2. 确定目标电梯节点 (在电梯自己的楼，但在机器人的楼层)
+    #    例如：机器人_pos = "1_1_A", 电梯 = (Bldg 2, E1) -> 目标 = "1_2_E1"
+    elevator_node = f"{robot_floor}_{elevator.bldg_num}_{elevator.local_id}"
 
-# ---- Graph ----
-class Graph:
-    def __init__(self):
-        # adjacency: node -> list of Edge
-        self.adj = defaultdict(list)
-        self.edges = {}  # edge_id -> Edge
+    # 3. 计算机器人从当前位置，步行到目标电梯口的时间
+    #    Dijkstra 会自动处理跨楼（例如 1_1_A -> 1_1_Right_2 -> 1_2_Left_2 -> 1_2_E1）
+    _path, time = graph.dijkstra(robot.position, elevator_node)
+    return time
 
-    def add_edge(self, u, v, length, etype, edge_id=None):
-        if edge_id is None:
-            edge_id = f"{u}-{v}"
-        e = Edge(u, v, length, etype, edge_id)
-        self.adj[u].append(e)
-        # also add reverse (bidirectional)
-        e_rev = Edge(v, u, length, etype, edge_id)  # same id for both directions (shared resource)
-        self.adj[v].append(e_rev)
-        self.edges[edge_id] = e
 
-    def neighbors(self, node):
-        return self.adj.get(node, [])
+def travel_time_exit(elevator: Elevator, target_pos: str, graph) -> float:
+    """计算从电梯出口到目标位置的时间."""
+    # 1. 获取目标在哪一层
+    target_floor, _ = get_node_details(target_pos)
 
-# ---- Pathfinding (Dijkstra-like with time and availability) ----
-def FindShortestPath(G: Graph, robot: Robot, start_node, end_node, current_time, edge_tag: EdgeTag, lift_tag: LiftTag, lift_ids_map=None):
+    # 2. 确定电梯的出口节点 (在电梯自己的楼，在目标楼层)
+    #    例如：目标_pos = "5_2_D", 电梯 = (Bldg 2, E1) -> 目标 = "5_2_E1"
+    elevator_node = f"{target_floor}_{elevator.bldg_num}_{elevator.local_id}"
+
+    # 3. 计算从电梯口步行到最终目标的时间
+    _path, time = graph.dijkstra(elevator_node, target_pos)
+    return time
+
+
+def calculate_elevator_time_need(n: int) -> float:
     """
-    Return: (path_nodes_list, arrival_time) or (None, math.inf) if unreachable.
-    This implementation allows waiting when an edge is occupied: it computes earliest arrival time to each node.
-    lift_ids_map: dict mapping edge_id -> lift_id if edge etype is 'lift'.
+    计算电梯跨越n层所需的时间 (基于 graph.py).
+    (开门1.5s + 关门1.5s + 运行1.75s*n + 开门1.5s)
+    这与PDF中的 (1,2) [cite: 33] 和 (1,3) [cite: 36] 示例一致.
     """
-    if lift_ids_map is None:
-        lift_ids_map = {}
+    if n == 0:
+        return 0
+    return 1.5 + 1.5 + 1.75 * n + 1.5
 
-    INF = float('inf')
-    dist = defaultdict(lambda: INF)  # earliest arrival time at node (absolute time)
-    prev = {}  # node -> (prev_node, edge_used_id, start_time_on_edge)
-    pq = []
-
-    # initial time to start node is max(robot.available_time, current_time)
-    start_time0 = max(robot.available_time, current_time)
-    dist[start_node] = start_time0
-    heappush(pq, (dist[start_node], start_node))
-
-    while pq:
-        t_u, u = heappop(pq)
-        # If popped time is larger than stored dist, skip
-        if t_u > dist[u] + 1e-9:
-            continue
-        if u == end_node:
-            break
-
-        for edge in G.neighbors(u):
-            v = edge.v
-            # travel time depends on robot's speed for that edge type
-            speed = robot.speed_for_edge(edge.etype)
-            if speed <= 0:
-                continue  # cannot traverse
-            travel_time = edge.length / speed
-
-            # earliest time robot can start traversing this edge:
-            earliest_arrival_at_u = dist[u]
-            # check edge availability
-            edge_free = edge_tag.get_free_time(edge.id)
-            start_on_edge = max(earliest_arrival_at_u, edge_free)  # wait if needed
-
-            # if lift, check lift availability via lift_tag
-            if edge.etype == 'lift':
-                lift_id = lift_ids_map.get(edge.id, edge.id)  # default lift id = edge id
-                lift_free = lift_tag.get_free_time(lift_id)
-                start_on_edge = max(start_on_edge, lift_free)
-
-            new_arrival_time = start_on_edge + travel_time
-
-            # relax
-            if new_arrival_time + 1e-9 < dist[v]:
-                dist[v] = new_arrival_time
-                prev[v] = (u, edge.id, start_on_edge)
-                heappush(pq, (dist[v], v))
-
-    if dist[end_node] == INF:
-        return None, INF
-
-    # reconstruct path nodes and edge ids
-    path_nodes = []
-    cur = end_node
-    edges_used = []
-    while cur != start_node:
-        if cur not in prev:
-            break
-        u, edge_id, start_on_edge = prev[cur]
-        path_nodes.append(cur)
-        edges_used.append((edge_id, start_on_edge))
-        cur = u
-    path_nodes.append(start_node)
-    path_nodes.reverse()
-    edges_used.reverse()  # align with path between nodes
-
-    # return both path nodes and list of edges with start times (useful for reservation)
-    return (path_nodes, edges_used), dist[end_node]
-
-# ---- Reservation update after choosing path ----
-def ReservePath(edge_tag: EdgeTag, lift_tag: LiftTag, edges_used, graph_edges, robot, start_time0, lift_ids_map=None):
+def generate_elevator_table() -> Dict[Tuple[int, int], float]:
     """
-    edges_used: list of (edge_id, start_time_on_edge) in the order of traversal.
-    Will reserve each edge / lift for the robot using durations computed from graph length and robot speed.
-    Returns final end time.
+    自动生成电梯时间查询表.
     """
-    if lift_ids_map is None:
-        lift_ids_map = {}
-    t = start_time0
-    for edge_id, start_time_on_edge in edges_used:
-        edge = graph_edges[edge_id]
-        # compute travel time using robot speed
-        travel_time = edge.length / robot.speed_for_edge(edge.etype)
-        # if start_time_on_edge may be earlier than current t due to rounding, enforce monotonicity:
-        start = max(t, start_time_on_edge)
-        # reserve edge
-        edge_tag.reserve(edge_id, start, travel_time)
-        if edge.etype == 'lift':
-            lift_id = lift_ids_map.get(edge_id, edge_id)
-            lift_tag.reserve(lift_id, start, travel_time)
-        t = start + travel_time
-    return t
-
-# ---- Main greedy scheduler ----
-def greedy_schedule(graph: Graph, robots, tasks, current_time, edge_tag: EdgeTag, lift_tag: LiftTag, lift_ids_map=None):
-    # tasks sorted by their time (earliest first)
-    tasks_sorted = sorted(tasks, key=lambda x: x.time)
-    solutions = []  # list of dicts {task, robot, path_nodes, start_time, end_time}
-    failures = []
-
-    for task in tasks_sorted:
-        # candidates: robots with needed skill and available before task.time (we allow robots that can start at or after task.time)
-        candidates = [r for r in robots if r.skill == task.skill_req]
-        best = None
-        best_arrival = float('inf')
-        best_details = None
-
-        for r in candidates:
-            # compute path from robot current pos to task.start
-            path_info, arrival_time = FindShortestPath(graph, r, r.position, task.start, current_time, edge_tag, lift_tag, lift_ids_map)
-            if path_info is None:
+    table = {}
+    # 假设所有电梯都服务1-9层 (为简单起见，后续可按建筑细分)
+    # 实际在 `multi_robot_scheduling` 中会通过 `travel_time` 过滤掉不在同一建筑的电梯
+    for i in range(1, 10):
+        for j in range(1, 10):
+            if i == j:
                 continue
-            # if robot can't reach until after some large time, skip (or allow)
-            if arrival_time < best_arrival:
-                best_arrival = arrival_time
-                best = r
-                best_details = path_info  # (path_nodes, edges_used)
+            n_floors = abs(i - j)
+            time = calculate_elevator_time_need(n_floors)
+            table[(i, j)] = time
+    return table
 
-        if best is None:
-            failures.append((task, "no feasible robot/path"))
+
+def lookup_elevator_time(elevator_table: Dict[Tuple[int, int], float], from_floor: int, to_floor: int) -> float:
+    """Lookup pre-measured elevator travel time."""
+    if (from_floor, to_floor) in elevator_table:
+        return elevator_table[(from_floor, to_floor)]
+    return float("inf") # 理论上 generate_elevator_table 已覆盖
+
+
+def visualize_schedules(elevators: List[Elevator]):
+    """Draw Gantt chart for elevator usage."""
+    fig, ax = plt.subplots(figsize=(12, 7))
+    y_labels = []
+    y_pos = []
+    color_map = plt.cm.get_cmap("tab10")
+
+    for i, e in enumerate(elevators):
+        y_labels.append(f"Elevator {e.id} (Bldg {e.bldg_num})")
+        y_pos.append(i)
+        for j, (s, end, f1, f2, rid) in enumerate(e.schedule):
+            color = color_map(rid % 10)
+            ax.barh(i, end - s, left=s, color=color, alpha=0.8, edgecolor='black')
+            ax.text(s + (end - s) / 2, i, f"R{rid} ({f1}→{f2})", ha="center", va="center", fontsize=9, color="white", fontweight='bold')
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(y_labels)
+    ax.set_xlabel("Time (s)")
+    ax.set_title("Elevator Usage Schedule")
+    plt.grid(axis='x', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# Core Algorithm
+# ============================================================
+
+def multi_robot_scheduling(tasks: List[Task], robots: List[Robot], elevators: List[Elevator],
+                           elevator_table: Dict[Tuple[int, int], float], graph):
+    """
+    Main scheduling and path planning algorithm.
+    为每个任务寻找最优机器人
+    """
+    results = []
+
+    for task in tasks:
+        print(f"\n--- [TASK {task.id}] Processing Task: Go to {task.target} (Skill: {task.skill}) ---")
+
+        candidate_robots = [r for r in robots if r.skill == task.skill]
+        if not candidate_robots:
+            print(f"  No suitable robot found for task {task.id}")
             continue
 
-        # Now compute path from task.start to task.target (robot is assumed to arrive at task.start at best_arrival)
-        # We'll treat robot as starting at task.start at time best_arrival
-        # For the pathfinding call, set robot.available_time temporarily to best_arrival for correct waiting behavior
-        saved_avail = best.available_time
-        best.available_time = best_arrival
-        path2_info, arrival_time2 = FindShortestPath(graph, best, task.start, task.target, best_arrival, edge_tag, lift_tag, lift_ids_map)
-        # restore robot.available_time for now; final will be set after reservation
-        best.available_time = saved_avail
+        best_overall_finish_time = float('inf')
+        best_robot = None
+        best_path_desc = ""
+        best_travel_time = 0.0
 
-        if path2_info is None:
-            # cannot reach target from start (should be rare)
-            failures.append((task, "can't reach target from start"))
-            continue
+        # 存储最优机器人的最优电梯选择
+        best_elevator_choice = {}
 
-        # Reserve both route segments sequentially:
-        # 1) robot current position -> task.start
-        path1_nodes, edges_used1 = best_details
-        # edges_used1 contains edge_id and start times relative to current_time; but we will compute reservations starting at max(robot.available_time, current_time)
-        start_time_segment1 = max(best.available_time, current_time)
-        end1 = ReservePath(edge_tag, lift_tag, edges_used1, graph.edges, best, start_time_segment1, lift_ids_map)
+        # 1. 遍历所有符合条件的机器人
+        for r in candidate_robots:
+            print(f"  Evaluating Robot {r.id} (at {r.position}, free at {r.available_time:.2f}s)")
 
-        # Update robot position to task.start and available_time to end1 (robot now at task.start at end1)
-        best.position = task.start
-        best.available_time = end1
+            robot_best_finish_time = float('inf')
+            robot_best_path = ""
+            robot_best_travel_time = 0.0
+            robot_elevator_choice = {}
 
-        # 2) task.start -> task.target (starting at best.available_time)
-        path2_nodes, edges_used2 = path2_info
-        end2 = ReservePath(edge_tag, lift_tag, edges_used2, graph.edges, best, best.available_time, lift_ids_map)
+            # --- Option A: Stairs or walking path via Dijkstra ---
+            _path, stair_time = graph.dijkstra(r.position, task.target)
 
-        # update robot final state
-        best.position = task.target
-        best.available_time = end2
+            if stair_time == float('inf'):
+                print(f"    - Path (Stairs): Unreachable")
+            else:
+                total_stair_finish_time = r.available_time + stair_time
+                print(f"    - Path (Stairs): {stair_time:.2f}s travel. (Finishes at {total_stair_finish_time:.2f}s)")
+                if total_stair_finish_time < robot_best_finish_time:
+                    robot_best_finish_time = total_stair_finish_time
+                    robot_best_path = "Stairs/Dijkstra"
+                    robot_best_travel_time = stair_time
+                    robot_elevator_choice = {} # 重置电梯选择
 
-        solutions.append({
-            'task': task,
-            'robot': best,
-            'path_to_start': path1_nodes,
-            'path_to_target': path2_nodes,
-            'start_time': start_time_segment1,
-            'arrive_start': end1,
-            'arrive_target': end2
-        })
+            # --- Option B: Elevators ---
+            for e in elevators:
+                # 2. 检查机器人和目标点是否在电梯所在的建筑
+                t_move = travel_time_to_elevator(r, e, graph)
+                if t_move == float('inf'):
+                    # print(f"    - Path (Elevator {e.id}): Robot cannot reach this elevator.")
+                    continue
 
-    return solutions, failures
+                t_exit = travel_time_exit(e, task.target, graph)
+                if t_exit == float('inf'):
+                    # print(f"    - Path (Elevator {e.id}): Target cannot be reached from this elevator.")
+                    continue
 
-# ---- Example usage / small scenario ----
-def example_run():
-    # build graph: nodes are strings "A:1", "B:1", etc
-    G = Graph()
-    # Add flat edges on floor 1
-    G.add_edge("A:1", "B:1", length=10.0, etype='flat', edge_id="A1-B1")
-    G.add_edge("B:1", "C:1", length=15.0, etype='flat', edge_id="B1-C1")
-    # stairs connecting floors at node B
-    G.add_edge("B:1", "B:2", length=5.0, etype='stair', edge_id="B1-B2")
-    # elevator connecting floors at node A (use same edge id for each direction)
-    G.add_edge("A:1", "A:2", length=2.0, etype='lift', edge_id="LIFT_A_1_2")
+                from_floor, _ = get_node_details(r.position)
+                to_floor, _ = get_node_details(task.target)
 
-    # create lift map (edge_id -> lift_id). Here single lift id "LIFT_A"
-    lift_ids_map = {"LIFT_A_1_2": "LIFT_A"}
+                if from_floor == to_floor:
+                    continue # 同层，不需要电梯
 
-    # robots
-    robots = [
-        Robot(id="R1", rtype="humanoid", skill="carry", ord="A", floor=1, v_flat=1.5, v_stair=0.8),
-        Robot(id="R2", rtype="wheel", skill="inspect", ord="B", floor=1, v_flat=2.0, v_stair=0.0),  # can't use stairs
-        Robot(id="R3", rtype="dog", skill="carry", ord="C", floor=1, v_flat=1.2, v_stair=0.9),
-    ]
+                # 4. 查找电梯行程时间
+                travel_t = lookup_elevator_time(elevator_table, from_floor, to_floor)
+                if travel_t == float('inf'):
+                    continue # 电梯不去这些楼层
 
-    # tasks: move from start to target, with required skill
-    tasks = [
-        Task(id="T1", skill_req="carry", start=("A",1), target=("B",2), time=0.0),
-        Task(id="T2", skill_req="inspect", start=("C",1), target=("A",2), time=5.0),
-    ]
+                # 5. 检查电梯可用性
+                desired_start = r.available_time + t_move
+                _available, extra_time = e.is_available(desired_start, travel_t, from_floor)
 
-    # initial tags
-    edge_tag = EdgeTag()
-    lift_tag = LiftTag(lift_ids=["LIFT_A"])
+                # 6. 计算总时间
+                total_elevator_travel_time = t_move + extra_time + travel_t + t_exit
+                total_elevator_finish_time = r.available_time + total_elevator_travel_time
 
-    # schedule
-    current_time = 0.0
-    sols, fails = greedy_schedule(G, robots, tasks, current_time, edge_tag, lift_tag, lift_ids_map)
+                # print(f"    - Path (Elevator {e.id}): {total_elevator_travel_time:.2f}s travel (move={t_move:.2f}, wait+arrival={extra_time:.2f}, ride={travel_t:.2f}, exit={t_exit:.2f}). (Finishes at {total_elevator_finish_time:.2f}s)")
 
-    print("=== Solutions ===")
-    for s in sols:
-        t = s['task']
-        r = s['robot']
-        print(f"Task {t.id} assigned to Robot {r.id}")
-        print(f"  path to start: {s['path_to_start']}, arrive at start: {s['arrive_start']:.2f}")
-        print(f"  path to target: {s['path_to_target']}, arrive at target: {s['arrive_target']:.2f}")
-        print()
+                if total_elevator_finish_time < robot_best_finish_time:
+                    robot_best_finish_time = total_elevator_finish_time
+                    robot_best_path = f"Elevator_{e.id}"
+                    robot_best_travel_time = total_elevator_travel_time
+                    robot_elevator_choice = {
+                        'e': e,
+                        'start_time': r.available_time + t_move + extra_time, # 电梯实际开始运行时间
+                        'duration': travel_t,
+                        'from': from_floor,
+                        'to': to_floor
+                    }
 
-    print("=== Failures ===")
-    for f in fails:
-        print(f)
+            # 7. 比较这个机器人的最佳时间与所有机器人的最佳时间
+            if robot_best_finish_time < best_overall_finish_time:
+                best_overall_finish_time = robot_best_finish_time
+                best_robot = r
+                best_path_desc = robot_best_path
+                best_travel_time = robot_best_travel_time
+                best_elevator_choice = robot_elevator_choice
 
-    print("=== Final Robot States ===")
-    for r in robots:
-        print(r)
+        # --- 任务分配和状态更新 ---
+        if best_robot:
+            print(f"  => [ASSIGNED] Task {task.id} to Robot {best_robot.id}. Path: {best_path_desc}, Travel Time: {best_travel_time:.2f}s, Finishes at: {best_overall_finish_time:.2f}s")
+
+            # 更新机器人状态
+            best_robot.available_time = best_overall_finish_time
+            best_robot.position = task.target
+
+            # 如果使用了电梯，更新电梯时间表
+            if best_elevator_choice.get('e'):
+                e = best_elevator_choice['e']
+                e.reserve(
+                    best_elevator_choice['start_time'],
+                    best_elevator_choice['duration'],
+                    best_elevator_choice['from'],
+                    best_elevator_choice['to'],
+                    best_robot.id
+                )
+
+            results.append((task.id, best_robot.id, best_path_desc, best_travel_time))
+        else:
+            print(f"  => [FAILED] No path found for any robot to complete task {task.id}")
+            results.append((task.id, -1, "Unreachable", float('inf')))
+
+    return results
+
+
+# ============================================================
+# Example Execution
+# ============================================================
 
 if __name__ == "__main__":
-    example_run()
+
+    # --- 1. 初始化图 ---
+    # 假设陆地速度1.5 m/s, 楼梯速度 0.5 m/s
+    print("Initializing building graph...")
+    graph = inital_graph(speed_land=1.5, speed_stair=0.5)
+    print("Graph initialized.")
+
+    # --- 2. 初始化电梯时间表 ---
+    elevator_table = generate_elevator_table()
+
+    # --- 3. 初始化电梯 (共6台) ---
+    # 建筑1 (1-3层): E1, E2
+    # 建筑2 (1-9层): E1, E2
+    # 建筑3 (1-6层): E1, E2
+    elevators = [
+        Elevator(eid=1, bldg_num=1, local_id='E1', current_floor=1),
+        Elevator(eid=2, bldg_num=1, local_id='E2', current_floor=1),
+        Elevator(eid=3, bldg_num=2, local_id='E1', current_floor=1),
+        Elevator(eid=4, bldg_num=2, local_id='E2', current_floor=1),
+        Elevator(eid=5, bldg_num=3, local_id='E1', current_floor=1),
+        Elevator(eid=6, bldg_num=3, local_id='E2', current_floor=1),
+    ]
+
+    # --- 4. 初始化机器人  ---
+    robots = []
+    start_pos = "1_1_Left_1" # 统一出发点
+    # 5 个机器狗
+    for i in range(5):
+        robots.append(Robot(rid=i + 1, skill="dog", position=start_pos))
+    # 5 个双足机器人
+    for i in range(5):
+        robots.append(Robot(rid=i + 6, skill="bipedal", position=start_pos))
+
+    print(f"Initialized {len(robots)} robots at {start_pos}.")
+
+    # --- 5. 定义任务列表 ---
+    tasks = [
+        Task(tid=1, skill="dog", start="1_1_A", target="3_1_C"),        # 任务1: 狗, 楼内, 1->3层 (Bldg 1)
+        Task(tid=2, skill="bipedal", start="1_1_A", target="5_2_D"),    # 任务2: 人, 跨楼, 1->5层 (Bldg 1 -> Bldg 2)
+        Task(tid=3, skill="dog", start="1_1_A", target="8_2_E"),        # 任务3: 狗, 跨楼, 1->8层 (Bldg 1 -> Bldg 2)
+        Task(tid=4, skill="bipedal", start="1_1_A", target="4_3_F"),    # 任务4: 人, 跨楼, 1->4层 (Bldg 1 -> Bldg 3)
+        Task(tid=5, skill="dog", start="1_1_A", target="2_1_G"),        # 任务5: 狗, 楼内, 1->2层 (Bldg 1, 抢占电梯)
+        Task(tid=6, skill="dog", start="1_1_A", target="9_2_A"),        # 任务6: 狗, 跨楼, 1->9层 (Bldg 1 -> Bldg 2)
+    ]
+
+    # --- 6. 运行调度 ---
+    result = multi_robot_scheduling(tasks, robots, elevators, elevator_table, graph)
+
+    # --- 7. 显示结果 ---
+    print("\n" + "=" * 70)
+    print("Task Execution Results:")
+    print("-" * 70)
+    for t_id, r_id, path, time_cost in result:
+        if r_id != -1:
+            print(f"Task {t_id:2d} → Robot {r_id:2d}: Path={path:15s} | Travel Time={time_cost:6.2f}s")
+        else:
+            print(f"Task {t_id:2d} → FAILED: Path unreachable.")
+    print("=" * 70)
+
+    # # --- 8. 可视化电梯调度 ---
+    # visualize_schedules(elevators)
