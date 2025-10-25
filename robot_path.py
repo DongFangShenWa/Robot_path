@@ -12,6 +12,8 @@ import threading
 # 全局变量用于存储实时路径和机器人状态
 current_paths = {}  # 存储每个任务的路径信息
 robot_status = {}   # 存储每个机器人的实时状态
+task_skill = "dog"  # 存储当前的需要的技能
+task_position = "8_2_A" #存储当前任务位置
 
 class Elevator:
     def __init__(self, eid: int, bldg_num: int, local_id: str, current_floor: int = 1):
@@ -289,6 +291,77 @@ class Scheduler:
             "path_info": best_info
         }
 
+# # ============================================================
+# # add for front Interface (real-time)
+# # ============================================================
+# def assign_task_from_frontend(skill: str, target: str):
+#     """
+#     从前端接收任务参数并分配任务
+#     :param skill: 机器人技能类型
+#     :param target: 目标位置
+#     :return: 任务分配结果
+#     """
+#     global task_counter, start_timestamp, scheduler
+#
+#     # 确保调度器已初始化
+#     if 'scheduler' not in globals() or scheduler is None:
+#         initialize_scheduler_system()
+#
+#     current_time = time.time() - start_timestamp
+#     task = Task(task_counter, skill, "", target)
+#     result = scheduler.assign_task(task, current_time)
+#
+#     if "error" not in result:
+#         task_counter += 1
+#
+#         # 更新机器人状态
+#         update_robot_status()
+#
+#     return result
+#
+#
+# def initialize_scheduler_system():
+#     """
+#     初始化调度系统组件
+#     """
+#     global stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph
+#     global elevators, robots, elevator_graphs, scheduler, start_timestamp, task_counter
+#
+#     stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph, _ = initial_six_graphs(
+#         speed_land=1.5, speed_stair=0.5
+#     )
+#     elevators = init_six_elevators()
+#     robots = [
+#         Robot(0, "dog", "1_1_Left_1"),
+#         Robot(1, "dog", "1_1_Left_1"),
+#         Robot(2, "human", "1_1_Left_1"),
+#         Robot(3, "human", "1_1_Left_1"),
+#     ]
+#     elevator_graphs = {
+#         "1_E1": add_1E1_graph, "1_E2": add_1E2_graph,
+#         "2_E1": add_2E1_graph, "2_E2": add_2E2_graph,
+#         "3_E1": add_3E1_graph, "3_E2": add_3E2_graph
+#     }
+#
+#     scheduler = Scheduler(robots, elevators, stair_graph, elevator_graphs)
+#     start_timestamp = time.time()
+#     task_counter = 0
+#
+#
+# def update_robot_status():
+#     """
+#     更新全局机器人状态
+#     """
+#     global robot_status
+#     now = time.time() - start_timestamp
+#     for r in robots:
+#         robot_status[r.id] = {
+#             "position": r.position,
+#             "real_position": get_coordinates_from_node(r.position),
+#             "available_time": r.available_time,
+#             "skill": r.skill,
+#             "status": "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
+#         }
 
 
 # ============================================================
@@ -296,7 +369,6 @@ class Scheduler:
 # ============================================================
 
 def start_terminal_scheduler():
-
 
     # 初始化图与对象
     stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph, _ = initial_six_graphs(
@@ -329,6 +401,7 @@ def start_terminal_scheduler():
     print("输入 'exit' 退出, 输入 'robot' 查看当前机器人状态")
 
     while True:
+        # 获取用户输入
         user_input = input("New Task> ").strip()
         if user_input.lower() == "exit":
             print("退出调度系统")
@@ -347,7 +420,6 @@ def start_terminal_scheduler():
         if len(user_input.split()) != 2:
             print("格式错误，请输入：<skill> <target_position>")
             continue
-
         skill, target = user_input.split()
         current_time = time.time() - start_timestamp
         task = Task(task_counter, skill, "", target)
