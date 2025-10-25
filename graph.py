@@ -242,17 +242,8 @@ def inital_graph(speed_land, speed_stair):
     add_floor7_graph = add_floor7(add_floor6_graph, stair_length_1, stair_length_2, v_l, v_s)
     add_floor8_graph = add_floor8(add_floor7_graph, stair_length_1, stair_length_2, v_l, v_s)
     add_floor9_graph = add_floor9(add_floor8_graph, stair_length_1, stair_length_2, v_l, v_s)
-
     stair_graph = add_floor9_graph
-    # add_1E1_graph = add_1_E_1_graph(stair_graph)
-    # add_1E2_graph = add_1_E_2_graph(stair_graph)
-    # add_2E1_graph = add_2_E_1_graph(stair_graph)
-    # add_2E2_graph = add_2_E_2_graph(stair_graph)
-    # add_3E1_graph = add_3_E_1_graph(stair_graph)
-    # add_3E2_graph = add_3_E_2_graph(stair_graph)
-    # final_graph = add_elevator_connect(add_floor9_graph)
-
-    return stair_graph#, add_1E1_graph,add_1E2_graph , add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph#, final_graph
+    return stair_graph
 
 def calculate_elevator_time_need(n):
     time_need = 1.5+1.5+1.75*n+1.5
@@ -581,7 +572,9 @@ def add_a_building_layer(graph, current_building, up_building, right_building, s
 
     graph.add_edge(current_building+"Stair1_1", current_building+"E",  (93-77)/v_l, bidirectional=False)
     graph.add_edge(current_building+"Stair1_1", current_building+"Stair1_2", (122-93)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"Stair1_2", current_building+"Stair1_1", (122-93)/v_l, bidirectional=False)
     graph.add_edge(current_building+"Cr", current_building+"Stair1_2",  (143-122)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"Cr", current_building+"E", (143-77)/v_l, bidirectional=False)
 
     graph.add_edge(current_building+"Er", current_building+"Stair1_2",  (122-77+113-92)/v_l, bidirectional=False)
     graph.add_edge(current_building+"Er", current_building+"C", (153-77)/v_l, bidirectional=False)
@@ -596,25 +589,23 @@ def add_a_building_layer(graph, current_building, up_building, right_building, s
     graph.add_edge(current_building+"G", current_building+"Dr", (293-220)/v_l, bidirectional=False)
     graph.add_edge(current_building+"D", current_building+"Gr", (293-220)/v_l, bidirectional=False)
 
-    graph.add_edge(current_building+"Ew", current_building+"G", (380-293)/v_l, bidirectional=False)
     graph.add_edge(current_building+"Stair2_1", current_building+"G",  (380-293)/v_l, bidirectional=False)
-    graph.add_edge(current_building+"Ew", current_building+"Stair2_2", stair_length_2/v_l)
 
-    graph.add_edge(current_building+"Gr", current_building+"Ewr", (380-293)/v_l,bidirectional=False)
-    graph.add_edge(current_building+"Gr", current_building+"E1", (380-293+150-100)/v_l,bidirectional=False)
-    graph.add_edge(current_building+"Gr", current_building+"E2", (410-293+150-100)/v_l,bidirectional=False)
-    graph.add_edge(current_building+"Gr", current_building+"Stair2_2", (380-293)/v_l,bidirectional=False)
-
-
-    graph.add_edge(current_building+"Ew", current_building+"E1", (150-110)/v_l,bidirectional=False)
-    graph.add_edge(current_building+"E1", current_building+"Ew", (150-110)/v_l,bidirectional=False)
-
-    graph.add_edge(current_building+"E1", current_building+"E2", (410-380)/v_l,bidirectional=False)
-    graph.add_edge(current_building+"E2", current_building+"E1", (410-380)/v_l,bidirectional=False)
+    graph.add_edge(current_building+"Gr", current_building+"E1", (390-293+150-100)/v_l,bidirectional=False) #380
+    graph.add_edge(current_building+"Gr", current_building+"E2", (400-293+150-100)/v_l,bidirectional=False) #410
+    graph.add_edge(current_building+"Gr", current_building+"Stair2_2", (380-293+199-100)/v_l,bidirectional=False)
+    graph.add_edge(current_building+"Gr", current_building+"Right_2", (433-293)/v_l,bidirectional=False)
 
 
-    graph.add_edge(current_building+"Right_1",current_building+"Ew", (433-380)/v_l, bidirectional=False)
-    graph.add_edge(current_building+"Ewr", current_building+"Right_2", (433-380)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"E1", current_building+"G", (390-293+150-110)/v_l,bidirectional=False) #380
+    graph.add_edge(current_building+"E2", current_building+"G", (400-293+150-110)/v_l,bidirectional=False) #410
+
+    graph.add_edge(current_building+"Right_1",current_building+"G", (433-293)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"Right_1",current_building+"E1", (433-380+150-112)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"Right_1",current_building+"E2", (433-410+150-112)/v_l, bidirectional=False)
+    graph.add_edge(current_building+"Right_1",current_building+"Stair2_2", (433-380+167-100)/v_l, bidirectional=False)
+
+
     graph.add_edge(current_building+"Right_2", current_building+"Right_1", (113-92)/v_l,bidirectional=False)
     graph.add_edge(current_building+"Right_1", current_building+"Right_2", (113-92)/v_l,bidirectional=False)
 
@@ -633,7 +624,9 @@ def add_a_building_layer(graph, current_building, up_building, right_building, s
     if right_building != "":
         graph.add_edge(right_building + "Left_1", current_building + "Right_1", 200 / v_l, bidirectional=False)
         graph.add_edge(current_building + "Right_2", right_building + "Left_2", 200 / v_l, bidirectional=False)
-        graph.add_edge(right_building + "Left_1", right_building + "Left_2", 200 / v_l)
+        graph.add_edge(right_building + "Left_1", right_building + "Left_2", 200 / v_l, bidirectional=False)
+        graph.add_edge(right_building + "Left_2", right_building + "Left_1", 200 / v_l, bidirectional=False)
+
     # Building1-2
 
     return graph
@@ -779,7 +772,7 @@ if __name__ == "__main__":
     stair_graph, add_1E1_graph,add_1E2_graph , add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph,final_graph= initial_six_graphs(speed_land=1.5, speed_stair=0.5)
     # # Example pathfinding
     #stair
-    path_stair, cost_stair = stair_graph.dijkstra("1_1_Left_2", "6_3_F")
+    path_stair, cost_stair = stair_graph.dijkstra("1_1_Left_2", "8_2_B")
     print("\nStair Shortest path:", path_stair)
     print("Stair Total travel time:", round(cost_stair, 2), "s")
     #1E1
@@ -787,23 +780,23 @@ if __name__ == "__main__":
     # print("\n1E1 Shortest path:", path_1E1)
     # print("1E1 Total travel time:", round(cost_1E1, 2), "s")
 
-    result_1E1 = add_3E1_graph.dijkstra_extra("1_1_Left_2", "6_3_B")
-    path1E1 = result_1E1["path"]
-    time_1E1 = result_1E1["total_time"]
-    before_1E1 = result_1E1["segments"]["before"]
-    after_1E1 = result_1E1["segments"]["after"]
-    between_1E1 = result_1E1["segments"]["between"]
-    start_1E1 = result_1E1["E_nodes"][0]
-    end_1E1 = result_1E1["E_nodes"][1]
-    print(result_1E1["path"])
-    print(result_1E1["total_time"])
-    print(result_1E1["segments"])
-    print(result_1E1["segments"]["before"])
-    print(result_1E1["segments"]["between"])
-    print(result_1E1["segments"]["after"])
-    print(result_1E1["E_nodes"])
-    print(result_1E1["E_nodes"][0])
-    print(result_1E1["E_nodes"][1])
+    # result_1E1 = add_3E1_graph.dijkstra_extra("1_1_Left_1", "1_1_B")
+    # path1E1 = result_1E1["path"]
+    # time_1E1 = result_1E1["total_time"]
+    # before_1E1 = result_1E1["segments"]["before"]
+    # after_1E1 = result_1E1["segments"]["after"]
+    # between_1E1 = result_1E1["segments"]["between"]
+    # start_1E1 = result_1E1["E_nodes"][0]
+    # end_1E1 = result_1E1["E_nodes"][1]
+    # print(result_1E1["path"])
+    # print(result_1E1["total_time"])
+    # print(result_1E1["segments"])
+    # print(result_1E1["segments"]["before"])
+    # print(result_1E1["segments"]["between"])
+    # print(result_1E1["segments"]["after"])
+    # print(result_1E1["E_nodes"])
+    # print(result_1E1["E_nodes"][0])
+    # print(result_1E1["E_nodes"][1])
 
     #1E2
     # path_1E2, cost_1E2 = add_1E2_graph.dijkstra("1_1_Left_2", "6_3_B")
@@ -817,14 +810,14 @@ if __name__ == "__main__":
     # path_2E2, cost_2E2 = add_2E2_graph.dijkstra("1_1_Left_2", "6_3_B")
     # print("\n2E2 Shortest path:", path_2E2)
     # print("2E2 Total travel time:", round(cost_2E2, 2), "s")
-    # #3E1
-    # path_3E1, cost_3E1 = add_3E1_graph.dijkstra("1_1_Left_2", "6_3_B")
-    # print("\n3E1 Shortest path:", path_3E1)
-    # print("3E1 Total travel time:", round(cost_3E1, 2), "s")
-    # #3E2
-    # path_3E2, cost_3E2 = add_3E2_graph.dijkstra("1_1_Left_2", "6_3_F")
-    # print("\n3E2 Shortest path:", path_3E2)
-    # print("3E2 Total travel time:", round(cost_3E2, 2), "s")
+    #3E1
+    path_3E1, cost_3E1 = add_3E1_graph.dijkstra("1_1_Left_2", "8_2_B")
+    print("\n3E1 Shortest path:", path_3E1)
+    print("3E1 Total travel time:", round(cost_3E1, 2), "s")
+    #3E2
+    path_3E2, cost_3E2 = add_3E2_graph.dijkstra("1_1_Left_2", "8_2_B")
+    print("\n3E2 Shortest path:", path_3E2)
+    print("3E2 Total travel time:", round(cost_3E2, 2), "s")
     # #total_path
     # path_total, cost_total = final_graph.dijkstra("1_1_Left_2", "6_3_B")
     # print("\nTotal Shortest path:", path_total)
