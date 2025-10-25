@@ -1,10 +1,17 @@
 import time
+from os.path import realpath
 from typing import Dict
 from graph import initial_six_graphs  # 假设已有图类，支持 dijkstra 和 dijkstra_extra
+from node import show_path_with_coords,get_coordinates_from_node
 import math
+import threading
 # ============================================================
 # Core Classes
 # ============================================================
+
+# 全局变量用于存储实时路径和机器人状态
+current_paths = {}  # 存储每个任务的路径信息
+robot_status = {}   # 存储每个机器人的实时状态
 
 class Elevator:
     def __init__(self, eid: int, bldg_num: int, local_id: str, current_floor: int = 1):
@@ -87,6 +94,8 @@ def select_best_path_with_elevator(
     最终选择总耗时最短的路径返回
     """
     path_results = {}
+    # 在函数开头声明使用全局变量
+    global current_paths
 
     # --------------------------
     # 1. 楼梯路径（无冲突）
@@ -171,14 +180,30 @@ def select_best_path_with_elevator(
         print(f"[!] Task {tid} failed: No valid path found from {start_pos} to {target_pos}")
         return {"error": "no_valid_path"}
 
-    best_key = min(path_results.keys(), key=lambda k: path_results[k]["actual_time"])
-    best_info = path_results[best_key]
+    # best_key = min(path_results.keys(), key=lambda k: path_results[k]["actual_time"])
+    # best_info = path_results[best_key]
 
     # --------------------------
     # 4. 输出结果并 Reserve
     # --------------------------
+
+
+    # 在选择最佳路径后更新全局变量
+    best_key = min(path_results.keys(), key=lambda k: path_results[k]["actual_time"])
+    best_info = path_results[best_key]
+    real_path = show_path_with_coords(best_info["path"])
+
+    current_paths[tid] = {
+        "route": best_key,
+        "path": best_info["path"],
+        "real_path": real_path,
+        "total_time": best_info['actual_time'],
+        "wait_time": best_info['wait_time']
+    }
+
     print(f"\nTask {tid} selected route: {best_key}, Total time: {best_info['actual_time']:.2f}s (wait {best_info['wait_time']:.2f}s)")
     print(f"Path: {best_info['path']}\n")
+    print(f"Real Path: {real_path}\n")
 
     if best_info["type"] == "elevator":
         eid = best_info["eid"]
@@ -216,6 +241,8 @@ class Scheduler:
 
     def assign_task(self, task, current_time):
         feasible_robots = self.find_feasible_robots(task, current_time)
+        global robot_status
+
         if not feasible_robots:
             return {"error": f"No robot matches skill '{task.skill}' for Task {task.id}"}
 
@@ -243,7 +270,16 @@ class Scheduler:
             return {"error": f"Task {task.id} failed: No valid path from {robot.position} to {task.target}"}
 
         robot.position = task.target
+        robot.real_position = get_coordinates_from_node(robot.position)
         robot.available_time = current_time + best_info["actual_time"]
+        # 在任务分配完成后更新机器人状态
+        robot_status[robot.id] = {
+            "position": robot.position,
+            "real_position": robot.real_position,
+            "available_time": robot.available_time,
+            "current_task": task.id,
+            "skill": robot.skill
+        }
 
         return {
             "robot_id": robot.id,
@@ -254,12 +290,13 @@ class Scheduler:
         }
 
 
+
 # ============================================================
 # Terminal Interface (real-time)
 # ============================================================
 
 def start_terminal_scheduler():
-    import threading
+
 
     # 初始化图与对象
     stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph, _ = initial_six_graphs(
@@ -330,6 +367,36 @@ def start_terminal_scheduler():
             print(f"Robot {r.id} ({r.skill}): pos={r.position}, available_time={r.available_time:.2f}, 状态={state}")
         print("----------------------------\n")
 
+        # 在每次任务分配后更新全局机器人状态
+        for r in robots:
+            robot_status[r.id] = {
+                "position": r.position,
+                "real_position": get_coordinates_from_node(r.position),
+                "available_time": r.available_time,
+                "skill": r.skill,
+                "status": "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
+            }
+
+        # print("**********************************")
+        # print(get_current_paths())
+        # print("**********************************")
+        # print(get_robot_status())
+
+
+def get_current_paths():
+    """获取当前所有路径信息"""
+    return current_paths
+
+
+def get_robot_status():
+    """获取当前所有机器人状态"""
+    return robot_status
+
+def clear_history():
+    """清空历史记录"""
+    global current_paths, robot_status
+    current_paths.clear()
+    robot_status.clear()
 
 if __name__ == "__main__":
     start_terminal_scheduler()
