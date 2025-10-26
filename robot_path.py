@@ -1,20 +1,18 @@
 import time
-from os.path import realpath
 from typing import Dict
 from graph import initial_six_graphs  # 假设已有图类，支持 dijkstra 和 dijkstra_extra
-from node import show_path_with_coords,get_coordinates_from_node
+from node import show_path_with_coords, get_coordinates_from_node, get_xyz_from_path_and_time,get_xyz_from_path_and_time_with_elevator_wait
 import math
-import threading
+import json
 # ============================================================
-# Core Classes
+# 全局变量
 # ============================================================
-
-# 全局变量用于存储实时路径和机器人状态
 current_paths = {}  # 存储每个任务的路径信息
 robot_status = {}   # 存储每个机器人的实时状态
-task_skill = "dog"  # 存储当前的需要的技能
-task_position = "8_2_A" #存储当前任务位置
-
+start_timestamp = 0
+# ============================================================
+# Classes
+# ============================================================
 class Elevator:
     def __init__(self, eid: int, bldg_num: int, local_id: str, current_floor: int = 1):
         self.id = eid
@@ -35,8 +33,14 @@ class Robot:
     def __init__(self, rid: int, skill: str, position: str):
         self.id = rid
         self.skill = skill
-        self.position = position
-        self.available_time = 0.0  # 实际秒表时间
+        self.position = position  # 节点名
+        self.available_time = 0.0  # 秒表时间
+        self.path = []  # 当前任务路径
+        self.path_start_time = None  # 当前任务开始时间
+        self.path_total_time = 0.0  # 当前任务总耗时
+        self.running_time = 0.0  # 当前任务已执行时间
+        self.wait_time = 0.0
+        self.current_position = get_coordinates_from_node(position)  # 初始xyz坐标
 
 
 class Task:
@@ -50,7 +54,6 @@ class Task:
 # ============================================================
 # Elevator Utilities
 # ============================================================
-
 def init_six_elevators() -> Dict[str, Elevator]:
     elevators = {}
     elevators["1_E1"] = Elevator(1, 1, "E1")
@@ -62,20 +65,9 @@ def init_six_elevators() -> Dict[str, Elevator]:
     return elevators
 
 
-def compute_elevator_wait_time(elevator: Elevator, from_floor: int, start_time: float, duration: float) -> float:
-    travel_time_to_start = abs(elevator.current_floor - from_floor) * 1.75
-    effective_start = start_time + travel_time_to_start
-    for (s, e, *_rest) in elevator.schedule:
-        if not (effective_start + duration <= s or effective_start >= e):
-            wait_time = e - effective_start
-            return travel_time_to_start + wait_time
-    return travel_time_to_start  # 没有冲突
-
-
 # ============================================================
 # Path Selection
 # ============================================================
-
 def select_best_path_with_elevator(
     tid: int,
     start_pos: str,
@@ -90,18 +82,10 @@ def select_best_path_with_elevator(
     elevators: dict,
     current_time: float
 ):
-    """
-    对同一任务计算楼梯路径 + 六种电梯路径
-    每种路径会根据当前电梯 schedule 判断等待时间
-    最终选择总耗时最短的路径返回
-    """
-    path_results = {}
-    # 在函数开头声明使用全局变量
     global current_paths
+    path_results = {}
 
-    # --------------------------
-    # 1. 楼梯路径（无冲突）
-    # --------------------------
+    # 楼梯路径
     path_stair, cost_stair = stair_graph.dijkstra(start_pos, target_pos)
     if path_stair and not math.isinf(cost_stair):
         path_results["stair"] = {
@@ -115,9 +99,7 @@ def select_best_path_with_elevator(
             "type": "stair"
         }
 
-    # --------------------------
-    # 2. 电梯路径
-    # --------------------------
+    # 电梯路径
     graph_map = {
         "1_E1": add_1E1_graph,
         "1_E2": add_1E2_graph,
@@ -131,7 +113,6 @@ def select_best_path_with_elevator(
         res = g.dijkstra_extra(start_pos, target_pos)
         if not res or "total_time" not in res or not res["path"]:
             continue
-
         before = res["segments"]["before"]
         between = res["segments"]["between"]
         after = res["segments"]["after"]
@@ -142,24 +123,16 @@ def select_best_path_with_elevator(
 
         elev = elevators[eid]
         from_floor = int(start_e.split("_")[0])
-
-
-        # 计算电梯到达所需时间
         travel_to_start = abs(elev.current_floor - from_floor) * 1.75
-
-        # effective_start = absolute_arrival + travel_to_start
         robot_arrival = current_time + before
         elevator_ready = current_time + travel_to_start
         effective_start = max(robot_arrival, elevator_ready)
-        # --- 检查电梯 schedule 是否冲突
+
         wait_time = 0.0
         for (s, e, _from, _to, _rid) in elev.schedule:
-            # 判断是否冲突
             if not (effective_start + between <= s or effective_start >= e):
-                # 若冲突，需要等到 e
                 wait_time = max(wait_time, e - effective_start)
 
-        # --- 总耗时
         actual_time = before + travel_to_start + wait_time + between + after
 
         path_results[eid] = {
@@ -175,22 +148,10 @@ def select_best_path_with_elevator(
             "type": "elevator"
         }
 
-    # --------------------------
-    # 3. 选择最短路径
-    # --------------------------
     if not path_results:
         print(f"[!] Task {tid} failed: No valid path found from {start_pos} to {target_pos}")
         return {"error": "no_valid_path"}
 
-    # best_key = min(path_results.keys(), key=lambda k: path_results[k]["actual_time"])
-    # best_info = path_results[best_key]
-
-    # --------------------------
-    # 4. 输出结果并 Reserve
-    # --------------------------
-
-
-    # 在选择最佳路径后更新全局变量
     best_key = min(path_results.keys(), key=lambda k: path_results[k]["actual_time"])
     best_info = path_results[best_key]
     real_path = show_path_with_coords(best_info["path"])
@@ -212,7 +173,6 @@ def select_best_path_with_elevator(
         elev = elevators[eid]
         from_floor = int(best_info["start_e"].split("_")[0])
         to_floor = int(best_info["end_e"].split("_")[0])
-
         reserve_start_abs = current_time + best_info["before"] + best_info["wait_time"]
         elev.reserve(
             start_time=reserve_start_abs,
@@ -221,16 +181,13 @@ def select_best_path_with_elevator(
             to_floor=to_floor,
             robot_id=tid
         )
-        print(f"[Elevator Reserved] {eid}: R{tid}: {from_floor}->{to_floor}, {reserve_start_abs:.2f}s - {reserve_start_abs + best_info['between']:.2f}s")
 
     return best_info
-
 
 
 # ============================================================
 # Scheduler
 # ============================================================
-
 class Scheduler:
     def __init__(self, robots, elevators, stair_graph, elevator_graphs):
         self.robots = robots
@@ -250,8 +207,7 @@ class Scheduler:
 
         robot = min(feasible_robots, key=lambda r: r.available_time)
         if current_time < robot.available_time:
-            return {
-                "error": f"Task {task.id} failed: Robot {robot.id} busy until {robot.available_time - current_time:.2f}s later"}
+            return {"error": f"Task {task.id} failed: Robot {robot.id} busy until {robot.available_time - current_time:.2f}s later"}
 
         best_info = select_best_path_with_elevator(
             tid=robot.id,
@@ -271,16 +227,23 @@ class Scheduler:
         if "error" in best_info:
             return {"error": f"Task {task.id} failed: No valid path from {robot.position} to {task.target}"}
 
+        # 更新机器人状态
         robot.position = task.target
-        robot.real_position = get_coordinates_from_node(robot.position)
+        robot.path = best_info["path"]
+        robot.path_start_time = current_time
+        robot.path_total_time = best_info["actual_time"]
         robot.available_time = current_time + best_info["actual_time"]
-        # 在任务分配完成后更新机器人状态
+        robot.wait_time = best_info.get("wait_time", 0.0)
+
+        robot.current_position = get_coordinates_from_node(robot.position)
+
         robot_status[robot.id] = {
             "position": robot.position,
-            "real_position": robot.real_position,
+            "real_position": robot.current_position,
             "available_time": robot.available_time,
             "current_task": task.id,
-            "skill": robot.skill
+            "skill": robot.skill,
+            "wait_time": robot.wait_time
         }
 
         return {
@@ -291,85 +254,101 @@ class Scheduler:
             "path_info": best_info
         }
 
-# # ============================================================
-# # add for front Interface (real-time)
-# # ============================================================
-# def assign_task_from_frontend(skill: str, target: str):
-#     """
-#     从前端接收任务参数并分配任务
-#     :param skill: 机器人技能类型
-#     :param target: 目标位置
-#     :return: 任务分配结果
-#     """
-#     global task_counter, start_timestamp, scheduler
-#
-#     # 确保调度器已初始化
-#     if 'scheduler' not in globals() or scheduler is None:
-#         initialize_scheduler_system()
-#
-#     current_time = time.time() - start_timestamp
-#     task = Task(task_counter, skill, "", target)
-#     result = scheduler.assign_task(task, current_time)
-#
-#     if "error" not in result:
-#         task_counter += 1
-#
-#         # 更新机器人状态
-#         update_robot_status()
-#
-#     return result
-#
-#
-# def initialize_scheduler_system():
-#     """
-#     初始化调度系统组件
-#     """
-#     global stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph
-#     global elevators, robots, elevator_graphs, scheduler, start_timestamp, task_counter
-#
-#     stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph, _ = initial_six_graphs(
-#         speed_land=1.5, speed_stair=0.5
-#     )
-#     elevators = init_six_elevators()
-#     robots = [
-#         Robot(0, "dog", "1_1_Left_1"),
-#         Robot(1, "dog", "1_1_Left_1"),
-#         Robot(2, "human", "1_1_Left_1"),
-#         Robot(3, "human", "1_1_Left_1"),
-#     ]
-#     elevator_graphs = {
-#         "1_E1": add_1E1_graph, "1_E2": add_1E2_graph,
-#         "2_E1": add_2E1_graph, "2_E2": add_2E2_graph,
-#         "3_E1": add_3E1_graph, "3_E2": add_3E2_graph
-#     }
-#
-#     scheduler = Scheduler(robots, elevators, stair_graph, elevator_graphs)
-#     start_timestamp = time.time()
-#     task_counter = 0
-#
-#
-# def update_robot_status():
-#     """
-#     更新全局机器人状态
-#     """
-#     global robot_status
-#     now = time.time() - start_timestamp
-#     for r in robots:
-#         robot_status[r.id] = {
-#             "position": r.position,
-#             "real_position": get_coordinates_from_node(r.position),
-#             "available_time": r.available_time,
-#             "skill": r.skill,
-#             "status": "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
-#         }
+# ============================================================
+# 实时获取机器人状态函数
+# ============================================================
+    """
+    获取当前所有机器人状态，输出前端可用格式：
+    posionX/Y/Z 是实时坐标
+    """
+    """ 获取当前所有机器人状态，输出前端可用格式： 
+    { "dataList": 
+    [ { "robotId": "0", 
+    "robotName": "Dog", 
+    "robotType": 1, 
+    "status": 0, 
+    "posionX": 12.00, 
+    "posionY": 3.5, 
+    "posionZ": 11.0, 
+    "timeStamp": 12321321312 
+    }, ... 
+    ] 
+    } """
+def get_robot_status_real_time(current_timestamp=None):
+    """
+    获取当前所有机器人状态，输出格式：
+    posionX/Y/Z 是实时坐标
+    增加 running_time 和 total_time
+    """
+    global scheduler, start_timestamp
+
+    if current_timestamp is None:
+        current_timestamp = time.time()
+
+    # 使用相对时间 now，与终端 loop 一致
+    now = current_timestamp - start_timestamp
+
+    data_list = []
+
+    for r in scheduler.robots:
+        # 当前任务已运行时间
+        if r.path_start_time is None:
+            running_time = 0.0
+        else:
+            running_time = now - r.path_start_time
+            if running_time < 0:
+                running_time = 0.0
+            elif running_time > r.path_total_time:
+                running_time = r.path_total_time
+
+        # 当前任务总运行时间
+        total_time = r.path_total_time if r.path else 0.0
+
+        # 获取实时坐标
+        if r.path and len(r.path) > 0:
+            try:
+                pos_x, pos_y, pos_z = get_xyz_from_path_and_time_with_elevator_wait(
+                    path_list=r.path,
+                    t=running_time,
+                    wait_time=r.wait_time
+                )
+            except Exception:
+                pos_x, pos_y, pos_z = get_coordinates_from_node(r.position)
+        else:
+            pos_x, pos_y, pos_z = get_coordinates_from_node(r.position)
+
+        # 状态判断
+        status_val = 0 if now >= r.available_time else 1
+        robot_type_val = 1 if r.skill.lower() == "dog" else 2
+        robot_name = "Dog"+str(r.id) if robot_type_val == 1 else "Human"+str(r.id)
+
+        data_list.append({
+            "robotId": str(r.id),
+            "robotName": robot_name,
+            "robotType": robot_type_val,
+            "status": status_val,
+            "posionX": round(pos_x, 2),
+            "posionY": round(pos_y, 2),
+            "posionZ": round(pos_z, 2),
+            "running_time": round(running_time, 2),   # 当前任务已运行时间
+            "total_time": round(total_time, 2),       # 当前任务总运行时间
+            "timeStamp": int(current_timestamp),
+        })
+
+    return {"dataList": data_list}
+
+def input_task(user_input):
+     if user_input != "":
+        user_input = user_input.split(" ")
+     else:
+        user_input = input("New Task> ").strip()
+     return user_input
 
 
 # ============================================================
-# Terminal Interface (real-time)
+# Terminal Interface
 # ============================================================
-
 def start_terminal_scheduler():
-
     # 初始化图与对象
     stair_graph, add_1E1_graph, add_1E2_graph, add_2E1_graph, add_2E2_graph, add_3E1_graph, add_3E2_graph, _ = initial_six_graphs(
         speed_land=1.5, speed_stair=0.5
@@ -386,6 +365,8 @@ def start_terminal_scheduler():
         "2_E1": add_2E1_graph, "2_E2": add_2E2_graph,
         "3_E1": add_3E1_graph, "3_E2": add_3E2_graph
     }
+    # global scheduler
+    global scheduler, start_timestamp  # 声明全局变量
 
     scheduler = Scheduler(robots, elevators, stair_graph, elevator_graphs)
 
@@ -394,81 +375,88 @@ def start_terminal_scheduler():
 
     print("=== Multi-Robot Real-Time Scheduler ===")
     print("输入任务格式：<skill> <target_position>，例如：dog 6_3_G, human 4_3_A")
-    print("6_3_G: 代表任务地点为 6楼3号楼G房间")
-    print("一号楼共3层， 二号楼共9层， 三号楼共6层， 每层有任务地点 A B C D E F G")
-    print("初始所有机器人位于一号楼一层左侧")
-    print("设定所有机器人靠右侧行走， 避免发生相撞")
     print("输入 'exit' 退出, 输入 'robot' 查看当前机器人状态")
 
+    # ================= Terminal Loop =================
     while True:
-        # 获取用户输入
-        user_input = input("New Task> ").strip()
+        user_input = input_task("")#input("New Task> ").strip()
+        now = time.time() - start_timestamp  # 确保 now 始终定义
+
         if user_input.lower() == "exit":
+            print(f"\nSchedule running time: {now:.2f}s")
             print("退出调度系统")
             break
 
+        # if user_input.lower() == "robot":
+        #     print(f"\nSchedule running time: {now:.2f}s")
+        #     print("\n--- 当前机器人状态 ---")
+        #     for r in robots:
+        #         # 计算 running_time
+        #         if r.path_start_time is None or now < r.path_start_time:
+        #             r.running_time = 0
+        #         elif now < r.path_start_time + r.path_total_time:
+        #             r.running_time = now - r.path_start_time
+        #         else:
+        #             r.running_time = r.path_total_time
+        #
+        #         # 安全更新 current_position，考虑电梯等待时间
+        #         if r.path and len(r.path) > 0:
+        #             try:
+        #                 r.current_position = get_xyz_from_path_and_time_with_elevator_wait(
+        #                     path_list=r.path,
+        #                     t=r.running_time,
+        #                     wait_time=r.wait_time
+        #                 )
+        #             except Exception:
+        #                 # 任何错误都回退到目标节点坐标
+        #                 r.current_position = get_coordinates_from_node(r.position)
+        #         else:
+        #             r.current_position = get_coordinates_from_node(r.position)
+        #
+        #         state = "空闲" if now >= r.available_time else f"忙碌({r.available_time - now:.1f}s)"
+        #
+        #         print(
+        #             f"Robot {r.id} ({r.skill}): task_final_pos={r.position}, "
+        #             f"current_position={r.current_position}, task_running_time={r.running_time:.2f}s, "
+        #             f"available_time={r.available_time:.2f}, 状态={state}"
+        #         )
+        #     print("----------------------\n")
+        #     continue
         if user_input.lower() == "robot":
+            print(f"\nSchedule running time: {now:.2f}s")
             print("\n--- 当前机器人状态 ---")
-            now = time.time() - start_timestamp
-            for r in robots:
-                state = "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
-                print(
-                    f"Robot {r.id} ({r.skill}): pos={r.position},available_time={r.available_time:.2f}, 状态={state}")
+
+            status_data = get_robot_status_real_time(current_timestamp=time.time())
+            # 直接打印整个字典
+            # for k, v in status_data.items():
+            #     print(f"{k}: {v}")
+            # print(status_data)
+            print(json.dumps(status_data, indent=4, ensure_ascii=False))
+
             print("----------------------\n")
             continue
 
+        # 解析任务输入
         if len(user_input.split()) != 2:
+            print(f"\nSchedule running time: {now:.2f}s")
             print("格式错误，请输入：<skill> <target_position>")
             continue
+
         skill, target = user_input.split()
-        current_time = time.time() - start_timestamp
         task = Task(task_counter, skill, "", target)
-        result = scheduler.assign_task(task, current_time)
+        result = scheduler.assign_task(task, now)
 
         if "error" in result:
             print(f"[!] {result['error']}")
         else:
-            print(f"[OK] 任务分配成功: Robot {result['robot_id']}, Start={result['start_time']:.2f}s, End={result['end_time']:.2f}s")
+            print(f"\nSchedule running time: {now:.2f}s")
+            print(
+                f"[OK] 任务分配成功: Robot {result['robot_id']}, Start={result['start_time']:.2f}s, End={result['end_time']:.2f}s")
             task_counter += 1
 
-        # 打印状态
-        print("\n--- 当前机器人状态 (实时) ---")
-        now = time.time() - start_timestamp
-        for r in robots:
-            state = "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
-            print(f"Robot {r.id} ({r.skill}): pos={r.position}, available_time={r.available_time:.2f}, 状态={state}")
-        print("----------------------------\n")
 
-        # 在每次任务分配后更新全局机器人状态
-        for r in robots:
-            robot_status[r.id] = {
-                "position": r.position,
-                "real_position": get_coordinates_from_node(r.position),
-                "available_time": r.available_time,
-                "skill": r.skill,
-                "status": "空闲" if r.available_time <= now else f"忙碌({r.available_time - now:.1f}s)"
-            }
-
-        # print("**********************************")
-        # print(get_current_paths())
-        # print("**********************************")
-        # print(get_robot_status())
-
-
-def get_current_paths():
-    """获取当前所有路径信息"""
-    return current_paths
-
-
-def get_robot_status():
-    """获取当前所有机器人状态"""
-    return robot_status
-
-def clear_history():
-    """清空历史记录"""
-    global current_paths, robot_status
-    current_paths.clear()
-    robot_status.clear()
-
+# ============================================================
+# Run
+# ============================================================
 if __name__ == "__main__":
     start_terminal_scheduler()
